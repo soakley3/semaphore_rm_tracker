@@ -1,0 +1,98 @@
+#
+#
+# Run with:
+#     # stap -g sema_rm_track.stp -v 2>&1 > /tmp/stap-$(hostname)-$(date | sed -e 's/ /-/g').txt &
+#
+# This creates a file in /tmp/
+#     # cat /tmp/stap-rhel8vm-Sun-Apr-28-19:27:47-EDT-2024.txt 
+#
+#	Example output from the /tmp/stap-* file:
+#
+#	[root@rhel8vm semas]# cat /tmp/stap-rhel8vm-Sun-Apr-28-19:33:26-EDT-2024.txt
+#
+#	Sun Apr 28 23:33:29 2024: Starting ipc semaphore removal monitoring
+#
+#	-> Sun Apr 28 23:35:31 2024: ipcrm (40654) called semctl_down 
+#	 -> semctl_down() called with semid=49 cmd=0
+#
+#	---> Sun Apr 28 23:35:31 2024: ipcrm (40654) called freeary 
+#	---> freeary() called with ipcp=
+#	--->     deleted = 0
+#	--->     id      = 49
+#	--->     key     = 0xffffffffbcce8eff
+#
+#	PID parental hierarchy:
+#		   UID         PID  Command
+#		     0       40654  ipcrm
+#		     0       17626  bash
+#		     0       17625  sshd
+#		     0       17620  sshd
+#		     0         733  sshd
+#		     0           1  systemd
+# End tracing with:
+#     # pkill -INT stap
+#
+
+%{
+#include <linux/sched.h>
+#include <linux/cred.h>
+%}
+
+function print_process_call_trace (pid:long)
+%{      
+
+        pid_t cur_pid, cur_ppid = (pid_t)STAP_ARG_pid;
+        kuid_t cur_uid;
+        char cur_cmd[TASK_COMM_LEN];
+        struct task_struct *cur = current;
+        const struct cred *cur_cred;
+        STAP_PRINTF("PID parental hierarchy:\n");
+        STAP_PRINTF("%10s  %10s  %.*s\n", "UID", "PID", TASK_COMM_LEN, "Command");
+        rcu_read_lock();
+        do {    
+                cur_pid = cur_ppid;
+                get_task_comm(cur_cmd, cur);
+                cur_cred = rcu_dereference(cur->real_cred);
+
+                STAP_PRINTF("%10u  %10u  %.*s\n", cur_cred->uid.val, cur_pid, TASK_COMM_LEN, cur_cmd);
+                if(!pid_alive(cur))
+                        break;
+                
+                cur = rcu_dereference(cur->real_parent);
+                cur_ppid = task_pid_nr_ns(cur, &init_pid_ns);
+        } while(cur_ppid != 0);
+        
+	dump_stack();
+        rcu_read_unlock();
+%}
+
+probe begin {
+        printf("\n%s: Starting ipc semaphore removal monitoring\n\n", ctime(gettimeofday_s()));
+}
+
+probe end {
+        printf("\n%s: Stopping ipc semaphore removal monitoring\n\n", ctime(gettimeofday_s()));
+}
+
+
+
+probe   kernel.function("freeary") {
+        printf("---> %s: %s (%i) called %s \n", ctime(gettimeofday_s()), execname(), pid(), ppfunc());
+	
+	printf("---> freeary() called with ipcp=\n");
+	printf("--->     deleted = %i\n", $ipcp->deleted);
+	printf("--->     id      = %i\n", $ipcp->id);
+	printf("--->     key     = %#lx\n\n", $ipcp->key);
+	print_process_call_trace(pid());
+	
+	printf("\n");
+}
+
+
+probe   kernel.function("semctl_down") {
+	if ($cmd == 0) { 
+		printf("-> %s: %s (%i) called %s \n", ctime(gettimeofday_s()), execname(), pid(), ppfunc());
+		printf("-> semctl_down() called with semid=%i cmd=%i\n\n", $semid, $cmd);
+
+	}
+}
